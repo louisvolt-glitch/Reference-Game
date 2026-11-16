@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gaming Room Quiz — exemple d'intégration</title>
+
+  <!-- Three.js (bibliothèque seule, aucun asset). Avec un bundler : `npm i three` et supprimez cette importmap. -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: #0b0c12; color: #eef0f7; }
+
+    /* Le conteneur doit avoir une taille : le module s'y adapte (ResizeObserver). */
+    #game { position: fixed; inset: 0; }
+
+    .hud { position: fixed; top: 16px; left: 16px; padding: 12px 16px; min-width: 210px;
+           background: rgba(16, 18, 30, .82); border: 1px solid #2c3050; border-radius: 12px; backdrop-filter: blur(6px); }
+    .hud strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+    .bar { height: 6px; margin-top: 8px; border-radius: 3px; background: #262a45; overflow: hidden; }
+    .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #2ecc71, #f5c542); transition: width .4s; }
+    .help { position: fixed; left: 16px; bottom: 16px; font-size: 13px; color: #9aa0bd; }
+    .hover { position: fixed; top: 16px; right: 16px; padding: 8px 12px; border-radius: 10px;
+             background: rgba(16, 18, 30, .82); border: 1px solid #2c3050; font-size: 13px; }
+    .hover:empty { display: none; }
+
+    dialog { width: min(92vw, 420px); padding: 22px; color: inherit; background: #141627;
+             border: 1px solid #343a5e; border-radius: 16px; }
+    dialog::backdrop { background: rgba(5, 6, 12, .6); }
+    dialog h2 { margin: 0 0 2px; font-size: 18px; }
+    .meta { margin: 0 0 12px; color: #9aa0bd; font-size: 13px; }
+    .hint { margin: 0 0 14px; padding: 10px 12px; border-left: 3px solid #f5c542; background: #1b1e33; border-radius: 6px; }
+    input[type=text] { width: 100%; padding: 11px 12px; font: inherit; color: inherit; background: #0d0f1c;
+                       border: 1px solid #343a5e; border-radius: 10px; }
+    input[type=text]:focus { outline: 2px solid #5aa9ff; outline-offset: 1px; }
+    .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+    button { padding: 9px 16px; font: inherit; color: inherit; cursor: pointer; background: #262a45;
+             border: 1px solid #343a5e; border-radius: 10px; }
+    button.primary { background: #2f6fdb; border-color: #2f6fdb; }
+    button.link { background: none; border: 0; padding: 0; color: #9aa0bd; text-decoration: underline; }
+    .feedback { min-height: 1.4em; margin: 10px 0 0; font-size: 14px; }
+    .feedback.bad { color: #ff7b7b; }
+    .shake { animation: shake .3s; }
+    @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+
+    .toast { position: fixed; left: 50%; bottom: 32px; transform: translate(-50%, 20px); padding: 12px 18px;
+             background: #173d28; border: 1px solid #2ecc71; border-radius: 12px; opacity: 0;
+             transition: opacity .25s, transform .25s; pointer-events: none; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+
+  <div class="hud">
+    Trouvés : <strong id="counter">0 / 100</strong>
+    <div class="bar"><i id="bar"></i></div>
+    <div style="margin-top:8px"><button class="link" id="reset" type="button">Recommencer</button></div>
+  </div>
+  <div class="hover" id="hover"></div>
+  <div class="help">Glisser : regarder · Molette : zoom · ZQSD / WASD / flèches : se déplacer · Clic : deviner</div>
+
+  <!-- Modale de saisie -->
+  <dialog id="guess-dialog">
+    <form id="guess-form" method="dialog">
+      <h2 id="guess-object">Quel est ce jeu ?</h2>
+      <p class="meta" id="guess-meta"></p>
+      <p class="hint" id="guess-hint" hidden></p>
+      <input type="text" id="guess-input" autocomplete="off" spellcheck="false" placeholder="Nom du jeu vidéo…" aria-label="Nom du jeu vidéo">
+      <p class="feedback" id="guess-feedback" role="status"></p>
+      <div class="row">
+        <button type="button" id="guess-hint-btn">Indice</button>
+        <button type="button" id="guess-cancel">Annuler</button>
+        <button type="submit" class="primary">Valider</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script type="module">
+    import { GamingRoomQuiz } from './GamingRoomQuiz.js';
+
+    const $ = (id) => document.getElementById(id);
+    const dialog = $('guess-dialog'), form = $('guess-form'), input = $('guess-input');
+    const feedback = $('guess-feedback'), hintEl = $('guess-hint');
+    let currentItemId = null;
+
+    /* 1. Instanciation : le module s'installe dans #game et dialogue via des callbacks. */
+    const quiz = new GamingRoomQuiz($('game'), {
+      storageKey: 'gaming-room-quiz:found',          // facultatif : mémorise la progression
+
+      // Clic sur un objet non trouvé → on ouvre la modale (aucun titre n'est transmis).
+      onSelectObject(item) {
+        currentItemId = item.id;
+        $('guess-object').textContent = item.objectLabel;
+        $('guess-meta').textContent = `Objet n° ${item.id} · Zone ${item.zone} — ${item.zoneName}`;
+        hintEl.textContent = item.hint ?? '';
+        hintEl.hidden = true;
+        $('guess-hint-btn').hidden = !item.hint;
+        feedback.textContent = '';
+        feedback.className = 'feedback';
+        input.value = '';
+        dialog.showModal();
+        input.focus();
+      },
+
+      // Chaque bonne réponse (et l'état initial) → compteur.
+      onProgressChange(found, total) {
+        $('counter').textContent = `${found} / ${total}`;
+        $('bar').style.width = `${(found / total) * 100}%`;
+        if (found === total) toast('🏆 Les 100 jeux sont trouvés, bravo !');
+      },
+
+      // Facultatif : le titre n'est présent que pour les objets déjà trouvés.
+      onHoverObject(item) {
+        $('hover').textContent = item ? (item.found ? `✓ ${item.title}` : `Objet n° ${item.id} — ${item.objectLabel}`) : '';
+      },
+      onSelectFoundObject(item) { toast(`✓ Déjà trouvé : ${item.title}`); },
+    });
+
+    /* 2. Le formulaire appelle submitGuess(itemId, texte). */
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const result = quiz.submitGuess(currentItemId, input.value);
+      if (result.success) {
+        dialog.close();
+        toast(`✓ ${result.canonicalTitle} — ${result.progress} / ${result.total}`);
+      } else {
+        feedback.textContent = input.value.trim() ? 'Ce n\'est pas ça… essayez encore.' : 'Saisissez le nom d\'un jeu.';
+        feedback.className = 'feedback bad';
+        form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
+        input.select();
+      }
+    });
+    $('guess-hint-btn').addEventListener('click', () => { hintEl.hidden = false; input.focus(); });
+    $('guess-cancel').addEventListener('click', () => dialog.close());
+    $('reset').addEventListener('click', () => { if (confirm('Effacer toute la progression ?')) quiz.reset(); });
+
+    let toastTimer;
+    function toast(message) {
+      const el = $('toast');
+      el.textContent = message;
+      el.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+    }
+
+    window.quiz = quiz;   // pratique pour tester depuis la console : quiz.focusItem(42)
+  </script>
+</body>
+</html>
