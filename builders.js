@@ -27,6 +27,15 @@ const S = (tf, spec, w = 256, h = 256) => {
   return M('#ffffff', { map, emissive: '#ffffff', emissiveMap: map, emissiveIntensity: 0.75, roughness: 0.3 });
 };
 
+/**
+ * Variantes « surface d'illustration » : le matériau est marqué (userData.isArt)
+ * pour pouvoir recevoir une image fournie par l'application hôte (options.assets).
+ * artAspect = largeur / hauteur de la surface, pour recadrer l'image sans la déformer.
+ */
+const mark = (material, w, h) => { material.userData.isArt = true; material.userData.artAspect = w / h; return material; };
+const TA = (tf, spec, w = 256, h = 256, o = {}) => mark(T(tf, spec, w, h, o), w, h);
+const SA = (tf, spec, w = 256, h = 256) => mark(S(tf, spec, w, h), w, h);
+
 export const G = {
   box: (w, h, d) => new THREE.BoxGeometry(w, h, d),
   cyl: (rt, rb, h, seg = 20, open = false) => new THREE.CylinderGeometry(rt, rb, h, seg, 1, open),
@@ -88,7 +97,7 @@ export const BUILDERS = {
     const shell = M(p.color ?? '#8d8f98');
     put(g, G.box(0.38, 0.36, 0.07), shell, [0, 0.22, 0]);
     put(g, G.box(0.30, 0.05, 0.055), M('#3c3c44'), [0, 0.025, 0]);          // connecteur
-    put(g, G.plane(0.30, 0.24), T(tf, p.art, 256, 205), [0, 0.24, 0.036]);  // étiquette
+    put(g, G.plane(0.30, 0.24), TA(tf, p.art, 256, 205), [0, 0.24, 0.036]);  // étiquette
     for (let i = -2; i <= 2; i++) put(g, G.box(0.03, 0.012, 0.072), M('#55555e'), [i * 0.06, 0.406, 0]);
     return g;
   },
@@ -96,7 +105,7 @@ export const BUILDERS = {
   case(p, tf) {
     const g = new THREE.Group();
     const side = M(p.color ?? '#222222', { roughness: 0.4 });
-    const front = T(tf, p.art, 256, 346, { roughness: 0.35 });
+    const front = TA(tf, p.art, 256, 346, { roughness: 0.35 });
     put(g, G.box(0.34, 0.46, 0.05), [side, side, side, side, front, side], [0, 0.23, 0]);
     put(g, G.box(0.345, 0.05, 0.052), M('#f2f2f2', { roughness: 0.4 }), [0, 0.435, 0]); // bandeau neutre
     return g;
@@ -117,7 +126,7 @@ export const BUILDERS = {
     put(g, G.box(0.02, 0.065, 0.012), M(DARK), [-0.18, 0.275, 0.034]);
     [[0, 0.024], [0.024, 0], [0, -0.024], [-0.024, 0]].forEach(([dx, dy]) =>
       put(g, G.cyl(0.011, 0.011, 0.012, 12), accent, [0.18 + dx, 0.275 + dy, 0.034], [PI / 2, 0, 0]));
-    put(g, G.plane(0.1, 0.1), T(tf, { bg: ['#ffffff', '#e4e4ec'], emoji: p.emoji, emojiScale: 0.7 }, 128, 128),
+    put(g, G.plane(0.1, 0.1), TA(tf, { bg: ['#ffffff', '#e4e4ec'], emoji: p.emoji, emojiScale: 0.7 }, 128, 128),
       [0, 0.275, 0.0312]);                                                         // autocollant
     return g;
   },
@@ -130,7 +139,7 @@ export const BUILDERS = {
     put(g, G.cyl(0.15, 0.17, 0.02), dark, [0, 0.01, 0]);
     put(g, G.box(0.05, 0.24, 0.04), dark, [0, 0.13, -0.02]);
     put(g, G.box(0.78, 0.46, 0.04), dark, [0, 0.45, 0]);
-    put(g, G.plane(0.72, 0.40), S(tf, p.art, 512, 284), [0, 0.45, 0.021]);
+    put(g, G.plane(0.72, 0.40), SA(tf, p.art, 512, 284), [0, 0.45, 0.021]);
     return g;
   },
 
@@ -176,7 +185,7 @@ export const BUILDERS = {
     const b = sub(g, [0, 0, 0], [-0.3, 0, 0]);
     put(b, G.box(0.2, 0.32, 0.04), M('#c9c9cf', { roughness: 0.5 }), [0, 0.16, 0]);
     put(b, G.box(0.16, 0.14, 0.005), M('#5a5a66'), [0, 0.225, 0.02]);
-    put(b, G.plane(0.13, 0.11), S(tf, p.art, 160, 136), [0, 0.225, 0.0235]);
+    put(b, G.plane(0.13, 0.11), SA(tf, p.art, 160, 136), [0, 0.225, 0.0235]);
     put(b, G.box(0.06, 0.02, 0.01), M(DARK), [-0.05, 0.1, 0.021]);
     put(b, G.box(0.02, 0.06, 0.01), M(DARK), [-0.05, 0.1, 0.021]);
     put(b, G.cyl(0.014, 0.014, 0.01, 12), M('#a02050'), [0.04, 0.092, 0.021], [PI / 2, 0, 0]);
@@ -450,14 +459,14 @@ export const BUILDERS = {
   poster(p, tf) {
     const g = new THREE.Group();
     put(g, G.box(0.86, 1.16, 0.03), M('#1b1b20', { roughness: 0.5 }), [0, 0, 0.015]);
-    put(g, G.plane(0.8, 1.1), T(tf, p.art, 512, 704), [0, 0, 0.0315]);
+    put(g, G.plane(0.8, 1.1), TA(tf, p.art, 512, 704), [0, 0, 0.0315]);
     return g;
   },
 
   shield(p, tf) {
     const g = new THREE.Group();
     const steel = metal('#9aa0a8');
-    const emblem = T(tf, { bg: ['#f3ead2', '#e0d3ae'], emoji: p.emoji, emojiScale: 0.62 }, 160, 160);
+    const emblem = TA(tf, { bg: ['#f3ead2', '#e0d3ae'], emoji: p.emoji, emojiScale: 0.62 }, 160, 160);
     if (p.shape === 'round') {
       put(g, G.cyl(0.42, 0.42, 0.05, 40), M(p.color, { roughness: 0.85 }), [0, 0, 0.03], [PI / 2, 0, 0]);
       put(g, G.tor(0.42, 0.025), steel, [0, 0, 0.045]);
@@ -537,7 +546,7 @@ export const BUILDERS = {
   clock(p, tf) {
     const g = new THREE.Group();
     put(g, G.cyl(0.38, 0.38, 0.06, 40), M(p.rim ?? '#3b2a1a', { roughness: 0.5 }), [0, 0, 0.03], [PI / 2, 0, 0]);
-    put(g, G.circle(0.33), T(tf, p.art, 256, 256), [0, 0, 0.062]);
+    put(g, G.circle(0.33), TA(tf, p.art, 256, 256), [0, 0, 0.062]);
     const hour = p.hour ?? 10.15;
     const hand = (angle, len, w) => {
       const pivot = sub(g, [0, 0, 0.07], [0, 0, -angle]);
@@ -557,7 +566,7 @@ export const BUILDERS = {
 
   cushion(p, tf) {
     const g = new THREE.Group();
-    const top = T(tf, p.art, 256, 256, { roughness: 0.95 });
+    const top = TA(tf, p.art, 256, 256, { roughness: 0.95 });
     if (p.round) {
       const side = M(p.color ?? '#ff8fbd', { roughness: 0.95 });
       put(g, G.cyl(0.24, 0.24, 0.13, 36), [side, top, side], [0, 0.065, 0]);
@@ -572,7 +581,7 @@ export const BUILDERS = {
     const g = new THREE.Group();
     const w = p.w ?? 1.5, d = p.d ?? 1.0;
     const side = M(p.art.bg[1], { roughness: 1 });
-    const top = T(tf, p.art, 512, Math.round((512 * d) / w), { roughness: 1 });
+    const top = TA(tf, p.art, 512, Math.round((512 * d) / w), { roughness: 1 });
     const mesh = put(g, G.box(w, 0.016, d), [side, side, top, side, side, side], [0, 0.008, 0]);
     mesh.castShadow = false;
     return g;
@@ -604,7 +613,7 @@ export const BUILDERS = {
     put(g, G.box(0.5, 0.7, 0.45), body, [0, 0.35, 0]);
     put(g, G.box(0.5, 0.42, 0.3), body, [0, 0.91, -0.075]);
     put(g, G.box(0.44, 0.34, 0.01), M(DARK), [0, 0.91, 0.078]);
-    put(g, G.plane(0.4, 0.3), S(tf, p.art, 256, 192), [0, 0.91, 0.0845]);
+    put(g, G.plane(0.4, 0.3), SA(tf, p.art, 256, 192), [0, 0.91, 0.0845]);
     const panel = sub(g, [0, 0.72, 0.21], [0.3, 0, 0]);
     put(panel, G.box(0.5, 0.05, 0.2), M('#2a2a30'), [0, 0, 0]);
     put(panel, G.cyl(0.008, 0.008, 0.07, 8), metal(), [-0.12, 0.06, 0]);
