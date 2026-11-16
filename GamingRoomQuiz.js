@@ -10,11 +10,17 @@
  *   const result = quiz.submitGuess(itemId, userText);
  *   // → { success, canonicalTitle, progress, total, alreadyFound }
  *
- * Dépendance : three (≥ r152) + OrbitControls. Aucun asset externe.
+ * Vue : la caméra suit la souris (capture du pointeur, façon FPS) ; glisser pour
+ * regarder quand le pointeur est libre (tactile inclus) ; ZQSD/WASD pour marcher.
+ *
+ * Assets : par défaut tout est procédural. L'option `assets` permet de brancher
+ * VOS images (jpg/png/webp) et VOS modèles (glTF/GLB) objet par objet — voir
+ * assets-manifest.example.js. GLTFLoader n'est chargé que si un modèle est déclaré.
+ *
+ * Dépendance : three (≥ r152).
  * Le conteneur doit avoir une taille (largeur ET hauteur) définie en CSS.
  */
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GAMES, ZONES } from './games-data.js';
 import { buildAnswerSet, matchAnswer } from './answer-matcher.js';
 import { createTextureFactory } from './textures.js';
@@ -115,6 +121,15 @@ export class GamingRoomQuiz {
    * @param {boolean} [options.fuzzy=true]      tolère une petite faute de frappe
    * @param {boolean} [options.shadows=true]
    * @param {number}  [options.moveSpeed=3]     vitesse ZQSD/WASD en m/s
+   * @param {boolean} [options.pointerLock=true]   capture la souris au clic (vue « FPS ») ; false = glisser pour regarder
+   * @param {number}  [options.lookSensitivity=1]  sensibilité de la souris
+   * @param {boolean} [options.crosshair=true]     affiche un viseur central quand la souris est capturée
+   * @param {(locked: boolean) => void} [options.onPointerLockChange]
+   * @param {Object<number, {image?: string, model?: string, modelScale?: number, modelRotationY?: number, modelOffset?: number[]}>} [options.assets]
+   *        images / modèles glTF fournis par l'application, indexés par ID d'objet
+   * @param {string}  [options.assetBaseUrl='']    préfixe des URLs relatives du manifeste
+   * @param {boolean} [options.symbols=true]       false = textures procédurales sans emoji (couleurs et motifs seuls)
+   * @param {(itemId: number, url: string, error: Error) => void} [options.onAssetError]
    */
   constructor(containerElement, options = {}) {
     if (!containerElement || typeof containerElement.appendChild !== 'function') {
@@ -123,7 +138,10 @@ export class GamingRoomQuiz {
     this.container = containerElement;
     this.options = {
       onSelectObject: null, onProgressChange: null, onHoverObject: null, onSelectFoundObject: null,
-      storageKey: null, fuzzy: true, shadows: true, moveSpeed: 3, ...options,
+      storageKey: null, fuzzy: true, shadows: true, moveSpeed: 3,
+      pointerLock: true, lookSensitivity: 1, crosshair: true, onPointerLockChange: null,
+      assets: null, assetBaseUrl: '', symbols: true, onAssetError: null,
+      ...options,
     };
 
     this._items = new Map();        // id → { game, group, hitbox, materials, badge, found, answers, center }
@@ -138,17 +156,22 @@ export class GamingRoomQuiz {
     this._pointerDown = null;
     this._raycaster = new THREE.Raycaster();
     this._clock = new THREE.Clock();
-    this._tmpDir = new THREE.Vector3();
-    this._tmpRight = new THREE.Vector3();
+    this._yaw = 0;                  // rotation horizontale de la vue (radians)
+    this._pitch = -0.05;            // rotation verticale
+    this._locked = false;           // souris capturée ?
+    this._drag = null;
+    this._loadedTextures = [];
     this._disposed = false;
 
     this._initRenderer();
-    this._textures = createTextureFactory();
+    this._textures = createTextureFactory({ symbols: this.options.symbols });
     this._buildRoom();
     this._buildFurniture();
     this._buildItems();
     this._bindEvents();
     this._restore();
+    /** Promesse résolue quand toutes les images / modèles du manifeste sont traités. */
+    this.assetsReady = this._loadAssets(this.options.assets);
 
     this._tick = this._tick.bind(this);
     this._raf = requestAnimationFrame(this._tick);
@@ -207,12 +230,28 @@ export class GamingRoomQuiz {
     const item = this._items.get(Number(itemId));
     if (!item) return;
     const c = item.center;
-    const toCenter = new THREE.Vector3(-c.x, 0, -c.z);
-    if (toCenter.lengthSq() < 0.01) toCenter.set(0, 0, 1);
-    toCenter.normalize();
-    this.controls.target.set(clamp(c.x, -5.4, 5.4), clamp(c.y, 0.3, 3.6), clamp(c.z, -4.4, 4.4));
-    this.camera.position.copy(this.controls.target).addScaledVector(toCenter, 2.2);
-    this.camera.position.y = clamp(c.y + 0.4, 0.5, 3.5);
+    const away = new THREE.Vector3(-c.x, 0, -c.z);
+    if (away.lengthSq() < 0.01) away.set(0, 0, 1);
+    away.normalize();
+    const p = this.camera.position;
+    p.set(clamp(c.x + away.x * 2.2, -5.6, 5.6), clamp(c.y + 0.2, 0.6, 3.4), clamp(c.z + away.z * 2.2, -4.6, 4.6));
+    const dx = c.x - p.x, dy = c.y - p.y, dz = c.z - p.z;
+    this._yaw = Math.atan2(-dx, -dz);
+    this._pitch = clamp(Math.atan2(dy, Math.hypot(dx, dz)), -1.45, 1.45);
+    this._pointerDirty = true;
+  }
+
+  /**
+   * Applique (ou remplace) à chaud l'image / le modèle d'un objet.
+   * @returns {Promise<void>}
+   */
+  setItemAssets(itemId, config) {
+    return this._loadAssets({ [itemId]: config });
+  }
+
+  /** Libère la souris (à appeler si votre UI s'ouvre sans passer par onSelectObject). */
+  releasePointer() {
+    if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock();
   }
 
   /** Libère toutes les ressources (GPU, écouteurs, canvas). */
@@ -222,7 +261,9 @@ export class GamingRoomQuiz {
     cancelAnimationFrame(this._raf);
     this._unbind?.();
     this._resizeObserver?.disconnect();
-    this.controls.dispose();
+    this.releasePointer();
+    this._crosshair?.remove();
+    this._loadedTextures.forEach((t) => t.dispose());
     this.scene.traverse((obj) => {
       obj.geometry?.dispose();
       const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : [];
@@ -251,19 +292,19 @@ export class GamingRoomQuiz {
     this.scene.background = new THREE.Color('#0b0c12');
 
     this.camera = new THREE.PerspectiveCamera(62, (w || 800) / (h || 600), 0.05, 60);
-    this.camera.position.set(0, 1.75, 3.4);
+    this.camera.rotation.order = 'YXZ';                 // lacet (Y) puis tangage (X) : vue à la première personne
+    this.camera.position.set(0, 1.65, 3.4);
+    canvas.style.cursor = 'grab';
 
-    this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(0, 1.45, 0.6);
-    this.controls.enablePan = false;
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
-    this.controls.rotateSpeed = 0.6;
-    this.controls.minDistance = 0.6;
-    this.controls.maxDistance = 3.6;
-    this.controls.minPolarAngle = 0.25;
-    this.controls.maxPolarAngle = PI - 0.45;
-    this.controls.update();
+    // Viseur central (visible uniquement quand la souris est capturée).
+    if (this.options.crosshair) {
+      if (getComputedStyle(this.container).position === 'static') this.container.style.position = 'relative';
+      const cross = document.createElement('div');
+      cross.style.cssText = 'position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-5px 0 0 -5px;'
+        + 'border:1px solid rgba(0,0,0,.6);border-radius:50%;background:rgba(255,255,255,.9);pointer-events:none;display:none;';
+      this.container.appendChild(cross);
+      this._crosshair = cross;
+    }
 
     // Lumières
     this.scene.add(new THREE.AmbientLight('#ffffff', 0.9));
@@ -375,23 +416,13 @@ export class GamingRoomQuiz {
 
       const group = builder(game.params ?? {}, tf);
       group.name = `item-${game.id}`;
+      const localBox = new THREE.Box3().setFromObject(group);   // gabarit local : sert à caler un modèle glTF
       group.position.set(slot.pos[0], slot.pos[1], slot.pos[2]);
       group.rotation.set(slot.rot?.[0] ?? 0, slot.rotY ?? slot.rot?.[1] ?? 0, slot.rot?.[2] ?? 0);
       this.scene.add(group);
       group.updateMatrixWorld(true);
 
-      // Matériaux propres à l'objet (pour la surbrillance) + état d'origine.
-      const materials = new Set();
-      group.traverse((obj) => {
-        if (!obj.isMesh) return;
-        (Array.isArray(obj.material) ? obj.material : [obj.material]).forEach((m) => {
-          if (m.emissive) {
-            m.userData.baseEmissive = m.emissive.getHex();
-            m.userData.baseIntensity = m.emissiveIntensity;
-            materials.add(m);
-          }
-        });
-      });
+      const { materials, artMaterials } = this._collectMaterials(group);
 
       // Boîte de collision invisible (clic confortable, même sur les objets fins).
       box.setFromObject(group);
@@ -415,13 +446,116 @@ export class GamingRoomQuiz {
       this.scene.add(badge);
 
       this._items.set(game.id, {
-        game, group, hitbox, badge, center,
-        materials: [...materials],
+        game, group, hitbox, badge, center, localBox,
+        materials, artMaterials,
         answers: buildAnswerSet(game.title, game.aliases),
         found: false,
         pop: 0,
       });
     }
+  }
+
+  /** Recense les matériaux d'un objet : surbrillance (émissif) et surfaces d'illustration. */
+  _collectMaterials(group) {
+    const materials = new Set(), artMaterials = new Set();
+    group.traverse((obj) => {
+      if (!obj.isMesh) return;
+      (Array.isArray(obj.material) ? obj.material : [obj.material]).forEach((m) => {
+        if (m.userData.isArt) artMaterials.add(m);
+        if (m.emissive) {
+          if (m.userData.baseEmissive === undefined) {
+            m.userData.baseEmissive = m.emissive.getHex();
+            m.userData.baseIntensity = m.emissiveIntensity;
+          }
+          materials.add(m);
+        }
+      });
+    });
+    return { materials: [...materials], artMaterials: [...artMaterials] };
+  }
+
+  /* ══════════════ Assets fournis par l'application (images / modèles) ══════════════ */
+
+  _assetUrl(url) {
+    return /^(?:[a-z]+:|\/)/i.test(url) ? url : this.options.assetBaseUrl + url;
+  }
+
+  /** Traite un manifeste { id: { image, model, … } }. Tout échec retombe sur l'objet procédural. */
+  _loadAssets(manifest) {
+    const jobs = [];
+    for (const [id, config] of Object.entries(manifest ?? {})) {
+      const item = this._items.get(Number(id));
+      if (!item || !config) continue;
+      const fail = (url) => (error) => {
+        console.warn(`GamingRoomQuiz : asset illisible pour l'objet ${id} (${url})`, error);
+        this.options.onAssetError?.(Number(id), url, error);
+      };
+      const image = () => (config.image ? this._applyImage(item, config).catch(fail(config.image)) : undefined);
+      jobs.push(config.model
+        ? this._applyModel(item, config).catch((error) => { fail(config.model)(error); return image(); })
+        : image());
+    }
+    return Promise.allSettled(jobs).then(() => undefined);
+  }
+
+  /** Plaque une image sur la surface d'illustration de l'objet (jaquette, écran, affiche…), recadrée sans déformation. */
+  async _applyImage(item, config) {
+    if (!item.artMaterials.length) throw new Error('cet objet n\'a pas de surface d\'illustration : fournissez plutôt un modèle');
+    const texture = await new THREE.TextureLoader().loadAsync(this._assetUrl(config.image));
+    if (this._disposed) { texture.dispose(); return; }
+    const imageAspect = texture.image.width / texture.image.height;
+    item.artMaterials.forEach((material, index) => {
+      const map = index === 0 ? texture : texture.clone();
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+      const surfaceAspect = material.userData.artAspect ?? 1;       // recadrage « cover »
+      if (imageAspect > surfaceAspect) map.repeat.set(surfaceAspect / imageAspect, 1);
+      else map.repeat.set(1, imageAspect / surfaceAspect);
+      map.offset.set((1 - map.repeat.x) / 2, (1 - map.repeat.y) / 2);
+      map.needsUpdate = true;
+      material.map = map;
+      if (material.emissiveMap) material.emissiveMap = map;
+      material.needsUpdate = true;
+      this._loadedTextures.push(map);
+    });
+  }
+
+  /** Remplace l'objet procédural par un modèle glTF/GLB, mis à l'échelle et calé dans le même gabarit. */
+  async _applyModel(item, config) {
+    this._gltfModule ??= import('three/addons/loaders/GLTFLoader.js');
+    const { GLTFLoader } = await this._gltfModule;
+    const gltf = await new GLTFLoader().loadAsync(this._assetUrl(config.model));
+    if (this._disposed) return;
+
+    const model = gltf.scene;
+    model.rotation.y += config.modelRotationY ?? 0;
+    const target = item.localBox, targetSize = target.getSize(new THREE.Vector3());
+    const box = new THREE.Box3().setFromObject(model), size = box.getSize(new THREE.Vector3());
+    const ratios = ['x', 'y', 'z'].filter((a) => size[a] > 1e-6 && targetSize[a] > 1e-6).map((a) => targetSize[a] / size[a]);
+    model.scale.multiplyScalar((ratios.length ? Math.min(...ratios) : 1) * (config.modelScale ?? 1));
+
+    box.setFromObject(model);
+    const from = box.getCenter(new THREE.Vector3()), to = target.getCenter(new THREE.Vector3());
+    if (item.game.zone === 3) { from.z = box.min.z; to.z = target.min.z; }    // objets muraux : dos contre le mur
+    else { from.y = box.min.y; to.y = target.min.y; }                          // objets posés : base au même niveau
+    model.position.add(to.sub(from));
+    if (config.modelOffset) model.position.add(new THREE.Vector3(...config.modelOffset));
+
+    model.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.castShadow = obj.receiveShadow = true;
+      obj.material = Array.isArray(obj.material) ? obj.material.map((m) => m.clone()) : obj.material.clone();
+    });
+
+    // Retire la version procédurale, installe le modèle et rebranche la surbrillance.
+    item.group.traverse((obj) => {
+      obj.geometry?.dispose();
+      (Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : []).forEach((m) => m.dispose());
+    });
+    item.group.clear();
+    item.group.add(model);
+    Object.assign(item, this._collectMaterials(item.group));
+    this._applyVisual(item);
   }
 
   /* ══════════════ Interactions ══════════════ */
@@ -431,24 +565,68 @@ export class GamingRoomQuiz {
     const isTyping = (target) => !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ''));
     const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 
-    const onPointerMove = (e) => {
+    const setPointerFromEvent = (e) => {
       const rect = canvas.getBoundingClientRect();
       this._pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
       this._pointerDirty = true;
     };
-    const onPointerDown = (e) => { this._pointerDown = { x: e.clientX, y: e.clientY, button: e.button }; };
+    const look = (dx, dy, factor) => {
+      this._yaw -= dx * factor;
+      this._pitch = clamp(this._pitch - dy * factor, -1.45, 1.45);
+      this._pointerDirty = true;
+    };
+
+    // La vue suit la souris : en continu quand elle est capturée, sinon en glissant (souris ou doigt).
+    const onPointerMove = (e) => {
+      const k = this.options.lookSensitivity;
+      if (this._locked) { look(e.movementX || 0, e.movementY || 0, 0.0022 * k); return; }
+      if (this._drag && this._drag.id === e.pointerId) {
+        look(-(e.clientX - this._drag.x), -(e.clientY - this._drag.y), 0.004 * k);
+        this._drag.x = e.clientX; this._drag.y = e.clientY;
+      }
+      setPointerFromEvent(e);
+    };
+    const onPointerDown = (e) => {
+      this._pointerDown = { x: e.clientX, y: e.clientY, button: e.button };
+      if (!this._locked) {
+        this._drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+        canvas.setPointerCapture?.(e.pointerId);
+        canvas.style.cursor = 'grabbing';
+      }
+    };
     const onPointerUp = (e) => {
       const down = this._pointerDown;
       this._pointerDown = null;
+      this._drag = null;
       if (!down || down.button !== 0) return;
-      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) return;      // c'était une rotation de caméra
-      onPointerMove(e);
-      const item = this._pick();
-      if (!item) return;
-      if (item.found) this.options.onSelectFoundObject?.(this._publicData(item));
-      else this.options.onSelectObject?.(this._publicData(item));
+      if (!this._locked) {
+        if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { this._pointerDirty = true; return; }  // c'était un glisser
+        setPointerFromEvent(e);
+      }
+      const item = this._pick();                            // souris capturée → viseur central
+      if (!item) {
+        // Clic « dans le vide » : on capture la souris pour regarder librement.
+        if (!this._locked && this.options.pointerLock && e.pointerType === 'mouse') canvas.requestPointerLock?.();
+        return;
+      }
+      if (item.found) { this.options.onSelectFoundObject?.(this._publicData(item)); return; }
+      this.releasePointer();                                // rend le curseur à l'interface (modale de saisie)
+      this.options.onSelectObject?.(this._publicData(item));
     };
-    const onPointerLeave = () => { this._pointer.set(2, 2); this._pointerDirty = true; };
+    const onPointerLeave = () => { if (!this._locked) { this._pointer.set(2, 2); this._pointerDirty = true; } };
+    const onLockChange = () => {
+      this._locked = document.pointerLockElement === canvas;
+      if (this._crosshair) this._crosshair.style.display = this._locked ? 'block' : 'none';
+      if (this._locked) this._pointer.set(0, 0);
+      this._pointerDirty = true;
+      this.options.onPointerLockChange?.(this._locked);
+    };
+    const onWheel = (e) => {                                // molette = zoom optique
+      e.preventDefault();
+      this.camera.fov = clamp(this.camera.fov + Math.sign(e.deltaY) * 3, 25, 75);
+      this.camera.updateProjectionMatrix();
+      this._pointerDirty = true;
+    };
 
     // e.code = position physique de la touche : KeyW/A/S/D couvre WASD (QWERTY) ET ZQSD (AZERTY).
     const onKeyDown = (e) => {
@@ -464,6 +642,8 @@ export class GamingRoomQuiz {
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointerleave', onPointerLeave);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    document.addEventListener('pointerlockchange', onLockChange);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
@@ -476,6 +656,8 @@ export class GamingRoomQuiz {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointerleave', onPointerLeave);
+      canvas.removeEventListener('wheel', onWheel);
+      document.removeEventListener('pointerlockchange', onLockChange);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
@@ -506,7 +688,7 @@ export class GamingRoomQuiz {
     this._hovered = item;
     if (previous) this._applyVisual(previous);
     if (item) this._applyVisual(item);
-    this.renderer.domElement.style.cursor = item ? 'pointer' : 'grab';
+    if (!this._drag) this.renderer.domElement.style.cursor = item ? 'pointer' : 'grab';
     this.options.onHoverObject?.(item ? this._publicData(item) : null);
   }
 
@@ -584,21 +766,11 @@ export class GamingRoomQuiz {
     const strafe = (k.KeyD || k.ArrowRight ? 1 : 0) - (k.KeyA || k.ArrowLeft ? 1 : 0);
     if (!forward && !strafe) return;
 
-    const dir = this._tmpDir, right = this._tmpRight;
-    this.camera.getWorldDirection(dir);
-    dir.y = 0;
-    if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
-    dir.normalize();
-    right.crossVectors(dir, this.camera.up).normalize();
-
+    // Repère de marche dérivé du lacet : avant = (-sin, 0, -cos), droite = (cos, 0, -sin).
+    const sin = Math.sin(this._yaw), cos = Math.cos(this._yaw);
     const step = (this.options.moveSpeed * dt) / Math.hypot(forward, strafe);
-    const target = this.controls.target;
-    const nx = clamp(target.x + (dir.x * forward + right.x * strafe) * step, -5.3, 5.3);
-    const nz = clamp(target.z + (dir.z * forward + right.z * strafe) * step, -4.3, 4.3);
-    const dx = nx - target.x, dz = nz - target.z;
-    target.x = nx; target.z = nz;
-    this.camera.position.x += dx;
-    this.camera.position.z += dz;
+    this.camera.position.x += (-sin * forward + cos * strafe) * step;
+    this.camera.position.z += (-cos * forward - sin * strafe) * step;
     this._pointerDirty = true;
   }
 
@@ -609,12 +781,11 @@ export class GamingRoomQuiz {
     const t = this._clock.elapsedTime;
 
     this._move(dt);
-    this.controls.update();
-    // La caméra reste dans la pièce.
+    // La caméra reste dans la pièce et s'oriente selon la souris.
     const p = this.camera.position;
-    p.x = clamp(p.x, -ROOM.w / 2 + 0.25, ROOM.w / 2 - 0.25);
-    p.y = clamp(p.y, 0.3, ROOM.h - 0.3);
-    p.z = clamp(p.z, -ROOM.d / 2 + 0.25, ROOM.d / 2 - 0.25);
+    p.x = clamp(p.x, -ROOM.w / 2 + 0.35, ROOM.w / 2 - 0.35);
+    p.z = clamp(p.z, -ROOM.d / 2 + 0.35, ROOM.d / 2 - 0.35);
+    this.camera.rotation.set(this._pitch, this._yaw, 0);
 
     if (this._pointerDirty) { this._pointerDirty = false; this._updateHover(); }
 
