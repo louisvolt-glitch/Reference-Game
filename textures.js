@@ -163,7 +163,7 @@ function drawSymbols(ctx, emoji, w, h, scale) {
 }
 
 /* ───────────── Fabrique (une par instance du quiz) ───────────── */
-export function createTextureFactory() {
+export function createTextureFactory({ symbols = true } = {}) {
   const cache = new Map();
 
   function finish(canvas, spec = {}) {
@@ -179,7 +179,7 @@ export function createTextureFactory() {
 
   /** Illustration générique : dégradé + motif + symbole(s) + bordure. */
   function art(spec, w = 256, h = 256) {
-    const key = JSON.stringify([spec, w, h]);
+    const key = JSON.stringify([spec, w, h, symbols]);
     if (cache.has(key)) return cache.get(key);
 
     const canvas = document.createElement('canvas');
@@ -199,7 +199,7 @@ export function createTextureFactory() {
       PATTERNS[spec.pattern](ctx, w, h, seeded(hash(key)));
       ctx.restore();
     }
-    if (spec.emoji) drawSymbols(ctx, spec.emoji, w, h, spec.emojiScale ?? 0.46);
+    if (spec.emoji && symbols) drawSymbols(ctx, spec.emoji, w, h, spec.emojiScale ?? 0.46);
     if (spec.border) {
       ctx.strokeStyle = spec.border;
       ctx.lineWidth = Math.min(w, h) * 0.05;
